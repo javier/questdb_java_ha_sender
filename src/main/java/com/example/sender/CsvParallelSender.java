@@ -1,8 +1,8 @@
 package com.example.sender;
 
 import io.questdb.client.Sender;
+import io.questdb.client.Sender.LineSenderBuilder;
 
-import java.io.FileReader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -15,6 +15,12 @@ import java.util.concurrent.*;
 
 import com.opencsv.CSVReader;
 
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.BufferedReader;
+import java.nio.charset.StandardCharsets;
+import java.util.zip.GZIPInputStream;
+
 public class CsvParallelSender {
 
     // Defaults mirror your Python script
@@ -23,7 +29,7 @@ public class CsvParallelSender {
     private static final int DEFAULT_DELAY_MS = 50;
     private static final int DEFAULT_NUM_SENDERS = 10;
     private static final int DEFAULT_RETRY_TIMEOUT = 360000;
-    private static final String DEFAULT_CSV = "./trades20250728.csv";
+    private static final String DEFAULT_CSV = "./trades20250728.csv.gz";
     private static final boolean DEFAULT_TIMESTAMP_FROM_FILE = false;
 
     public static void main(String[] args) throws Exception {
@@ -56,6 +62,7 @@ public class CsvParallelSender {
         }
 
         final String conf = buildConf(addrsCsv, token, username, password, retryTimeout);
+        final LineSenderBuilder builder = buildBuilder(addrsCsv, token, username, password, retryTimeout);
         System.out.println("Ingestion started. Connecting with config: " + conf.replaceAll("(token=)([^;]+)", "$1***")
                 .replaceAll("(password=)([^;]+)", "$1***"));
 
@@ -73,7 +80,8 @@ public class CsvParallelSender {
         for (int id = 0; id < numSenders; id++) {
             final long eventsForThis = base + (id < rem ? 1 : 0);
             final int senderId = id;
-            futures.add(exec.submit(() -> runWorker(senderId, eventsForThis, delayMs, timestampFromFile, rows, conf)));
+            //futures.add(exec.submit(() -> runWorker(senderId, eventsForThis, delayMs, timestampFromFile, rows, conf)));
+            futures.add(exec.submit(() -> runWorker(senderId, eventsForThis, delayMs, timestampFromFile, rows, builder)));
         }
 
         // Wait for completion
@@ -95,11 +103,12 @@ public class CsvParallelSender {
             int delayMs,
             boolean timestampFromFile,
             List<TradeRow> rows,
-            String conf
+            LineSenderBuilder builder
+            //String conf
     ) {
         System.out.printf("Sender %d will send %d events%n", senderId, totalEvents);
         long sent = 0;
-        try (Sender sender = Sender.fromConfig(conf)) {
+        try ( Sender sender = builder.build()) { //( Sender sender = Sender.fromConfig(conf)) {
             final int n = rows.size();
             for (long i = 0; i < totalEvents; i++) {
                 TradeRow r = rows.get((int) (i % n));
@@ -140,14 +149,21 @@ public class CsvParallelSender {
 
     private static List<TradeRow> loadCsv(String path, boolean needTimestamp) throws Exception {
         List<TradeRow> out = new ArrayList<>(1024);
-        try (CSVReader reader = new CSVReader(new FileReader(path))) {
+        try (InputStream in0 = Files.newInputStream(Path.of(path));
+            InputStream in = path.endsWith(".gz") ? new GZIPInputStream(in0) : in0;
+            InputStreamReader isr = new InputStreamReader(in, StandardCharsets.UTF_8);
+            BufferedReader br = new BufferedReader(isr);
+            CSVReader reader = new CSVReader(br)) {
+
             String[] header = reader.readNext();
             if (header == null) {
                 return out;
             }
-            Map<String, Integer> idx = headerIndex(header,
+            Map<String, Integer> idx = headerIndex(
+                    header,
                     new String[]{"symbol", "side", "price", "amount"},
-                    needTimestamp ? new String[]{"timestamp"} : new String[]{});
+                    needTimestamp ? new String[]{"timestamp"} : new String[]{}
+            );
 
             String[] row;
             while ((row = reader.readNext()) != null) {
@@ -184,6 +200,38 @@ public class CsvParallelSender {
         return idx;
     }
 
+    private static LineSenderBuilder buildBuilder(String addrsCsv, String token, String username, String password, int retryTimeout) {
+        String[] addrs = Arrays.stream(addrsCsv.split(","))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .toArray(String[]::new);
+
+        boolean hasToken = token != null && !token.isEmpty();
+        boolean hasBasic = username != null && !username.isEmpty() && password != null && !password.isEmpty();
+
+        LineSenderBuilder sb = Sender.builder(Sender.Transport.HTTP);
+
+        if ((hasToken || hasBasic)) {
+            sb =  sb.enableTls().advancedTls().disableCertificateValidation();
+        }
+
+        for (String addr : addrs) {
+            sb.address(addr);
+        }
+
+        if (hasToken) {
+            sb.httpToken(token);
+        } else if (hasBasic) {
+            sb.httpUsernamePassword(username, password);
+        }
+
+        sb.retryTimeoutMillis(retryTimeout);
+        //sb.maxBackoffMillis(5000);
+        sb.protocolVersion(2);
+
+        return sb;
+    }
+
     private static String buildConf(String addrsCsv, String token, String username, String password, int retryTimeout) {
         String[] addrs = Arrays.stream(addrsCsv.split(","))
                 .map(String::trim)
@@ -213,6 +261,7 @@ public class CsvParallelSender {
         }
 
         sb.append("retry_timeout=").append(retryTimeout).append(";");
+        sb.append("maxBackoffMillis=5000;");
         return sb.toString();
     }
 
