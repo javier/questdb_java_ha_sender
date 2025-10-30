@@ -1,13 +1,13 @@
 # Sample Sender with Multiple Hosts for HA Ingestion
 
-## Compile 
+## Compile
 
 `mvn  -DskipTests clean package`
 
 ## Usage Example
 
 ```
-java -jar target/ilp_sender-1.0-SNAPSHOT.jar \                                                                                                                                                                            🙈
+java -jar target/ilp_sender-1.0-SNAPSHOT.jar \
 --addrs enterprise-primary:9000,enterprise-replica:9000,enterprise-replica2:9000 \
 --token "$ILP_TOKEN" \
 --total-events 50000000 \
